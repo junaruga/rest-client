@@ -17,6 +17,7 @@ module RestClient
   # Optional parameters (have a look at ssl and/or uri for some explanations):
   # * :headers a hash containing the request headers
   # * :cookies will replace possible cookies in the :headers
+  # * :cookie_jar can be used to pass a structured cookie jar
   # * :user and :password for basic auth, will be replaced by a user/password available in the :url
   # * :block_response call the provided block with the HTTPResponse as parameter
   # * :raw_response return a low-level RawResponse instead of a Response
@@ -38,7 +39,7 @@ module RestClient
   #      called with the HTTP request and request params.
   class Request
 
-    attr_reader :method, :uri, :url, :headers, :cookies, :payload, :proxy,
+    attr_reader :method, :uri, :url, :headers, :payload, :proxy,
                 :user, :password, :read_timeout, :max_redirects,
                 :open_timeout, :raw_response, :processed_headers, :args,
                 :ssl_opts
@@ -123,7 +124,10 @@ module RestClient
         raise ArgumentError, "must pass :url"
       end
       parse_url_with_auth!(url)
-      @cookies = @headers.delete(:cookies) || args[:cookies] || {}
+
+      # TODO
+      process_cookie_args!
+
       @payload = Payload.generate(args[:payload])
       @user = args[:user]
       @password = args[:password]
@@ -267,13 +271,57 @@ module RestClient
       end
     end
 
-    def make_headers user_headers
-      unless @cookies.empty?
+    def cookies
+      # TODO: include only those valid for URL?
 
+      hash = {}
+      @cookie_jar.cookies.each do |c|
+        hash[c.name] = c.value
+      end
+
+      hash
+    end
+
+    def cookie_jar
+      raise TODO
+      # TODO expose?
+    end
+
+    def process_cookie_args!
+      cookies_hash = @headers.delete(:cookies) || args[:cookies] || {}
+      cookie_jar = @headers.delete(:cookie_jar) || args[:cookie_jar]
+
+      # TODO validate more
+      if cookies_hash && cookie_jar
+        raise ArgumentError.new('Cannot pass both :cookies and :cookie_jar')
+      end
+
+      # TODO: always put cookies into the cookie jar?
+
+      @cookies_hash = cookies_hash
+      @cookie_jar = cookie_jar
+    end
+
+    def make_cookie_header
+      if @cookies_hash.empty? && !@cookie_jar
+        return nil
+      end
+
+      # belt + suspenders validation
+      if @cookies_hash && @cookie_jar
+        raise ArgumentError.new('Cannot pass :cookies & :cookie_jar')
+      end
+
+      if @cookie_jar
+        raise TODO # TODO
+        return foo
+      end
+
+      unless @cookies_hash.empty?
         # Validate that the cookie names and values look sane. If you really
         # want to pass scary characters, just set the Cookie header directly.
         # RFC6265 is actually much more restrictive than we are.
-        @cookies.each do |key, val|
+        @cookies_hash.each do |key, val|
           unless valid_cookie_key?(key)
             raise ArgumentError.new("Invalid cookie name: #{key.inspect}")
           end
@@ -282,11 +330,37 @@ module RestClient
           end
         end
 
-        user_headers = user_headers.dup
-        user_headers[:cookie] = @cookies.map { |key, val| "#{key}=#{val}" }.sort.join('; ')
+        return @cookies_hash.map { |key, val| "#{key}=#{val}" }.sort.join('; ')
       end
+    end
+
+    # Generate headers for use by a request. Header keys will be stringified
+    # using `#stringify_headers` to normalize them as capitalized strings.
+    #
+    # The final headers consist of:
+    #   - default headers from #default_headers
+    #   - user_headers provided here
+    #   - headers from the payload object (e.g. Content-Type, Content-Lenth)
+    #   - cookie headers from #make_cookie_header
+    #
+    # @param [Hash] user_headers User-provided headers to include
+    #
+    # @return [Hash<String, String>] A hash of HTTP headers => values
+    #
+    def make_headers(user_headers)
       headers = stringify_headers(default_headers).merge(stringify_headers(user_headers))
       headers.merge!(@payload.headers) if @payload
+
+      # merge in cookies
+      cookies = make_cookie_header
+      if cookies
+        if headers['Cookie']
+          raise ArgumentError.new(
+            'Cannot pass "Cookie" header and :cookies / :cookie_jar options')
+        end
+        headers['Cookie'] = cookies
+      end
+
       headers
     end
 
